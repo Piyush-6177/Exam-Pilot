@@ -1,9 +1,65 @@
 import { useCallback, useState, memo } from 'react';
 import { motion } from 'framer-motion';
-import { Upload, FileCheck, X, BookOpen, Clock } from 'lucide-react';
+import { Upload, FileCheck, X, BookOpen, Clock, AlertTriangle } from 'lucide-react';
+import { extractTextFromPdf } from '../utils/pdfTextExtractor';
+import { hasMinimumAcademicKeywords } from '../utils/documentValidation';
 
 const PDFDropzone = memo(function PDFDropzone({ label, onFileSelect, file }) {
   const [isDragging, setIsDragging] = useState(false);
+  const [isChecking, setIsChecking] = useState(false);
+  const [showAcademicWarning, setShowAcademicWarning] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null);
+
+  const validateAndSetFile = useCallback(
+    async (selectedFile) => {
+      if (!selectedFile) return;
+
+      // Layer 1: Reject non-PDF by filename
+      const name = (selectedFile.name || '').toLowerCase();
+      if (!name.endsWith('.pdf')) {
+        onFileSelect(null);
+        return;
+      }
+
+      // Optional: Quick check - scan first 1000 chars for academic keywords
+      setIsChecking(true);
+      setShowAcademicWarning(false);
+      setPendingFile(null);
+
+      try {
+        const text = await extractTextFromPdf(selectedFile, 1500);
+        const looksAcademic = hasMinimumAcademicKeywords(text, 1000, 2);
+
+        if (looksAcademic) {
+          onFileSelect(selectedFile);
+        } else {
+          setPendingFile(selectedFile);
+          setShowAcademicWarning(true);
+        }
+      } catch (err) {
+        // If extraction fails (e.g. scanned PDF), allow the file anyway
+        console.warn('PDF text extraction failed, allowing file:', err);
+        onFileSelect(selectedFile);
+      } finally {
+        setIsChecking(false);
+      }
+    },
+    [onFileSelect]
+  );
+
+  const handleConfirmAnyway = useCallback(() => {
+    if (pendingFile) {
+      onFileSelect(pendingFile);
+      setPendingFile(null);
+      setShowAcademicWarning(false);
+    }
+  }, [pendingFile, onFileSelect]);
+
+  const handleCancelWarning = useCallback(() => {
+    setPendingFile(null);
+    setShowAcademicWarning(false);
+    onFileSelect(null);
+  }, [onFileSelect]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -15,32 +71,44 @@ const PDFDropzone = memo(function PDFDropzone({ label, onFileSelect, file }) {
     setIsDragging(false);
   }, []);
 
-  const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const droppedFile = e.dataTransfer.files[0];
-    if (droppedFile && droppedFile.type === 'application/pdf') {
-      onFileSelect(droppedFile);
-    }
-  }, [onFileSelect]);
+  const handleDrop = useCallback(
+    (e) => {
+      e.preventDefault();
+      setIsDragging(false);
+      const droppedFile = e.dataTransfer.files[0];
+      if (droppedFile && droppedFile.type === 'application/pdf') {
+        validateAndSetFile(droppedFile);
+      }
+    },
+    [validateAndSetFile]
+  );
 
-  const handleFileInput = useCallback((e) => {
-    const selectedFile = e.target.files[0];
-    if (selectedFile && selectedFile.type === 'application/pdf') {
-      onFileSelect(selectedFile);
-    }
-  }, [onFileSelect]);
+  const handleFileInput = useCallback(
+    (e) => {
+      const selectedFile = e.target.files[0];
+      if (selectedFile && selectedFile.type === 'application/pdf') {
+        validateAndSetFile(selectedFile);
+      }
+      e.target.value = '';
+    },
+    [validateAndSetFile]
+  );
 
-  const handleRemove = useCallback((e) => {
-    e.stopPropagation();
-    onFileSelect(null);
-  }, [onFileSelect]);
+  const handleRemove = useCallback(
+    (e) => {
+      e.stopPropagation();
+      setPendingFile(null);
+      setShowAcademicWarning(false);
+      onFileSelect(null);
+    },
+    [onFileSelect]
+  );
 
   const handleClick = useCallback(() => {
-    if (!file) {
+    if (!file && !pendingFile && !showAcademicWarning) {
       document.getElementById(`file-input-${label}`)?.click();
     }
-  }, [file, label]);
+  }, [file, pendingFile, showAcademicWarning, label]);
 
   const hasFile = !!file;
   const fileSize = file ? (file.size / 1024 / 1024).toFixed(2) : null;
@@ -75,8 +143,47 @@ const PDFDropzone = memo(function PDFDropzone({ label, onFileSelect, file }) {
           onChange={handleFileInput}
           className="hidden"
         />
-        
-        {hasFile ? (
+
+        {showAcademicWarning && pendingFile ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="flex flex-col items-center relative text-left"
+          >
+            <div className="flex items-center gap-2 text-amber-400 mb-2">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <span className="text-sm font-medium">This doesn't look like an academic document. Are you sure?</span>
+            </div>
+            <p className="text-xs text-zinc-500 mb-4">{pendingFile.name}</p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleCancelWarning();
+                }}
+                className="secondary-button text-sm py-2 px-4"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleConfirmAnyway();
+                }}
+                className="primary-button text-sm py-2 px-4"
+              >
+                Continue anyway
+              </button>
+            </div>
+          </motion.div>
+        ) : isChecking ? (
+          <div className="flex flex-col items-center py-4">
+            <div className="w-8 h-8 border-2 border-white/20 border-t-zinc-100 rounded-full animate-spin mb-3" />
+            <p className="text-sm text-zinc-400">Checking document...</p>
+          </div>
+        ) : hasFile ? (
           <motion.div
             initial={{ scale: 0.95 }}
             animate={{ scale: 1 }}
@@ -92,7 +199,7 @@ const PDFDropzone = memo(function PDFDropzone({ label, onFileSelect, file }) {
             <motion.div
               initial={{ scale: 0 }}
               animate={{ scale: 1 }}
-              transition={{ type: "spring", stiffness: 300, damping: 20 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 20 }}
             >
               <FileCheck className="w-12 h-12 text-zinc-300 mb-3" />
             </motion.div>

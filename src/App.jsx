@@ -20,6 +20,7 @@ function App() {
   const [currentStep, setCurrentStep] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState(null);
+  const [invalidDocumentType, setInvalidDocumentType] = useState(null); // Layer 3: INVALID_DOCUMENT friendly UI
   const { exportToMarkdown } = useMarkdownExport();
 
   const handleAnalyze = useCallback(async () => {
@@ -30,6 +31,7 @@ function App() {
 
     setIsAnalyzing(true);
     setError(null);
+    setInvalidDocumentType(null);
     setAnalysis(null);
     setCurrentStep(PROGRESS_STEPS[0]);
 
@@ -44,7 +46,13 @@ function App() {
       setAnalysis(result);
       setCurrentStep(null);
     } catch (err) {
-      setError(err.message || 'Failed to analyze documents. Please try again.');
+      if (err && err.code === 'INVALID_DOCUMENT') {
+        setInvalidDocumentType(err.detectedType || 'non-academic document');
+        setError('INVALID_DOCUMENT');
+      } else {
+        setInvalidDocumentType(null);
+        setError(err.message || 'Failed to analyze documents. Please try again.');
+      }
       setCurrentStep(null);
     } finally {
       setIsAnalyzing(false);
@@ -60,6 +68,7 @@ function App() {
     setSyllabusFile(null);
     setPyqFile(null);
     setError(null);
+    setInvalidDocumentType(null);
   }, []);
 
   const canAnalyze = useMemo(() => {
@@ -146,9 +155,15 @@ function App() {
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   transition={{ duration: 0.2 }}
-                  className="glass-card border-red-900/30 bg-red-900/10 p-4"
+                  className={error === 'INVALID_DOCUMENT' ? 'p-4 rounded-xl border bg-red-950/50 border-red-900/50' : 'glass-card border-red-900/30 bg-red-900/10 p-4'}
                 >
-                  <p className="text-red-400 text-sm">{error}</p>
+                  {error === 'INVALID_DOCUMENT' ? (
+                    <p className="text-red-300 text-sm">
+                      Oops! That looks like a <span className="font-semibold text-red-200">{invalidDocumentType || 'non-academic file'}</span>. Please upload a valid Syllabus or Past Question Papers.
+                    </p>
+                  ) : (
+                    <p className="text-red-400 text-sm">{error}</p>
+                  )}
                 </motion.div>
               )}
 

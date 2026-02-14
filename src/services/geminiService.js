@@ -1,4 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { extractTextFromPdf } from '../utils/pdfTextExtractor';
+import { validateDocumentContent } from '../utils/documentValidation';
 
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
@@ -49,14 +51,31 @@ function processResponse(response) {
 
   try {
     const analysis = JSON.parse(jsonText.trim());
+    // Layer 3: Handle AI-returned INVALID_DOCUMENT
+    if (analysis && analysis.error === 'INVALID_DOCUMENT') {
+      const err = new Error(analysis.reason || 'The file appears to be unrelated to academic coursework.');
+      err.code = 'INVALID_DOCUMENT';
+      err.detectedType = (analysis.reason || '').match(/detected:\s*([^)]+)/)?.[1]?.trim() || 'non-academic document';
+      throw err;
+    }
     return analysis;
   } catch (parseError) {
+    // Rethrow our INVALID_DOCUMENT so UI can show friendly message
+    if (parseError && parseError.code === 'INVALID_DOCUMENT') throw parseError;
     // If JSON parsing fails, try to extract JSON object from the text
     const jsonObjectMatch = jsonText.match(/\{[\s\S]*\}/);
     if (jsonObjectMatch) {
       try {
-        return JSON.parse(jsonObjectMatch[0]);
+        const analysis = JSON.parse(jsonObjectMatch[0]);
+        if (analysis && analysis.error === 'INVALID_DOCUMENT') {
+          const err = new Error(analysis.reason || 'The file appears to be unrelated to academic coursework.');
+          err.code = 'INVALID_DOCUMENT';
+          err.detectedType = (analysis.reason || '').match(/detected:\s*([^)]+)/)?.[1]?.trim() || 'non-academic document';
+          throw err;
+        }
+        return analysis;
       } catch (e) {
+        if (e && e.code === 'INVALID_DOCUMENT') throw e;
         throw new Error('Failed to parse JSON response. The AI response may not be in the correct format.');
       }
     }
@@ -124,15 +143,38 @@ export async function analyzeExamStrategy(syllabusFile, pyqFile, onProgress) {
   
   try {
     onProgress?.('Step 1: Extracting PDFs...');
-    
-    // Convert PDFs to base64
+
+    // Layer 2: Gatekeeper - validate document content before calling AI
+    const [syllabusText, pyqText] = await Promise.all([
+      extractTextFromPdf(syllabusFile, 4000).catch(() => ''),
+      extractTextFromPdf(pyqFile, 4000).catch(() => ''),
+    ]);
+    const combinedText = (syllabusText + '\n' + pyqText).slice(0, 8000);
+    const validation = validateDocumentContent(combinedText);
+    if (!validation.passed) {
+      throw Object.assign(
+        new Error('Uploaded file does not appear to be a valid Syllabus or Question Paper.'),
+        { code: 'INVALID_DOCUMENT', status: 400 }
+      );
+    }
+
+    // Convert PDFs to base64 for Gemini
     const [syllabusData, pyqData] = await Promise.all([
       fileToBase64(syllabusFile),
       fileToBase64(pyqFile),
     ]);
 
-    // Optimized, more concise prompt
-    const prompt = `Analyze the syllabus and past exam papers. Map syllabus topics to exam questions. Identify "Low Effort, High Reward" topics (short topics that appear frequently).
+    // Layer 3: Strict Persona system prompt (fail-safe)
+    const prompt = `You are a strict Academic Quality Controller. Your ONLY job is to analyze University Syllabi and Past Exam Papers.
+
+PHASE 1: VALIDATION
+First, scan the provided documents for academic context. Look for course codes, unit breakdowns, university names, or question patterns.
+- IF the text appears to be a receipt, ticket, invoice, or random non-academic text: STOP.
+- Return this EXACT JSON error (nothing else): {"error": "INVALID_DOCUMENT", "reason": "The file appears to be unrelated to academic coursework (detected: [Insert what you found, e.g., Train Ticket])."}
+
+PHASE 2: ANALYSIS
+Only if Phase 1 passes (documents are clearly syllabus or exam papers), proceed:
+Map syllabus topics to exam questions. Identify "Low Effort, High Reward" topics (short topics that appear frequently).
 
 For each topic, provide:
 - Topic name
@@ -142,7 +184,7 @@ For each topic, provide:
 - Frequency count
 - Key concepts (2-3 max)
 
-Output ONLY valid JSON:
+Output ONLY valid JSON (no error field):
 {
   "topics": [
     {
@@ -254,9 +296,14 @@ Output ONLY valid JSON:
     
   } catch (error) {
     console.error('Error analyzing documents:', error);
-    
+
+    // Preserve INVALID_DOCUMENT for UI to show friendly card
+    if (error && error.code === 'INVALID_DOCUMENT') {
+      throw error;
+    }
+
     const errorMessage = error.message || error.toString();
-    
+
     // Provide more helpful error messages
     if (errorMessage.includes('timeout')) {
       throw new Error('Request timeout: Analysis is taking longer than expected. Please try again with smaller PDFs.');
